@@ -20,3 +20,7 @@ DEBUG = os.environ.get("DEBUG", "false").lower() == "true"
 
 # CORS settings
 CORS_ORIGINS = os.environ.get("CORS_ORIGINS", "*").split(",")
+
+# MongoDB settings
+MONGODB_URI = os.environ.get("MONGODB_URI", "mongodb://localhost:27017")
+MONGODB_DATABASE = os.environ.get("MONGODB_DATABASE", "recommendation_system")
