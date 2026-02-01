@@ -28,12 +28,21 @@ public class JwtAuthenticationFilter extends OncePerRequestFilter {
         try {
             String jwt = getJwtFromRequest(request);
 
+            if (jwt == null) {
+                System.out.println("JWT Filter: No token found in request header");
+            } else {
+                System.out.println("JWT Filter: Token found: " + jwt);
+            }
+
             if(StringUtils.hasText(jwt) && tokenProvider.validateToken(jwt)){
                 String username = tokenProvider.getUsernameFromToken(jwt);
                 UserDetails userDetails = userDetailsService.loadUserByUsername(username);
                 UsernamePasswordAuthenticationToken authenticationToken = new UsernamePasswordAuthenticationToken(userDetails, null, userDetails.getAuthorities());
                 authenticationToken.setDetails(new WebAuthenticationDetailsSource().buildDetails(request));
                 SecurityContextHolder.getContext().setAuthentication(authenticationToken);
+                System.out.println("JWT Filter: Authentication set for user: " + username);
+            } else {
+                System.out.println("JWT Filter: Token validation failed");
             }
         } catch (Exception e){
             logger.error("Could not set user authentication in security context ", e);

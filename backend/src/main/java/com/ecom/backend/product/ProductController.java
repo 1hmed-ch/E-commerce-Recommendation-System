@@ -2,6 +2,7 @@ package com.ecom.backend.product;
 
 import com.ecom.backend.common.ApiResponse;
 import com.ecom.backend.product.dto.ProductDTO;
+import com.ecom.backend.recommendation.RecommendationService;
 import io.swagger.v3.oas.annotations.Operation;
 import lombok.RequiredArgsConstructor;
 import org.springframework.http.ResponseEntity;
@@ -15,6 +16,7 @@ import java.util.List;
 public class ProductController {
 
     private final ProductService productService;
+    private final RecommendationService recommendationService;
 
     @GetMapping
     @Operation(summary = "Get all products", description = "Retrieve all available products")
@@ -44,8 +46,11 @@ public class ProductController {
         return ResponseEntity.ok(ApiResponse.success(products));
     }
 
-
-
-
+    @GetMapping("/{id}/recommendations")
+    @Operation(summary = "Get product recommendations", description = "Get similar products recommended by ML service")
+    public ResponseEntity<ApiResponse<List<ProductDTO>>> getRecommendations(@PathVariable Long id) {
+        List<ProductDTO> products = recommendationService.getRecommendations(id);
+        return ResponseEntity.ok(ApiResponse.success("Recommendations retrieved successfully", products));
+    }
 
 }

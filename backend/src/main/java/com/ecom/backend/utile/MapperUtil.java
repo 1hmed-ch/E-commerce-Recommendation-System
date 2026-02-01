@@ -64,11 +64,16 @@ public class MapperUtil {
 
         OrderItemDTO dto = new OrderItemDTO();
         dto.setId(orderItem.getId());
+        if (orderItem.getOrder() != null) {
+            dto.setOrderId(orderItem.getOrder().getId());
+        }
+
         dto.setProductId(orderItem.getProduct().getId());
         dto.setProductName(orderItem.getProduct().getName());
         dto.setQuantity(orderItem.getQuantity());
         dto.setPrice(orderItem.getPrice());
         dto.setSubtotal(orderItem.getSubtotal());
+
         return dto;
     }
 }
