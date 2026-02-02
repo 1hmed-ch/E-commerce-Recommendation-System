@@ -48,6 +48,20 @@ class SearchResponse(BaseModel):
     query: str
 
 
+class SearchResultItem(BaseModel):
+    """Lightweight search result with only ASIN and scores."""
+    asin: str
+    similarity: float
+    final_score: float
+
+
+class SearchResponseSlim(BaseModel):
+    """Slim response model returning only ASIN IDs with scores."""
+    results: List[SearchResultItem]
+    count: int
+    query: str
+
+
 class StatsResponse(BaseModel):
     """Response model for stats endpoint."""
     total_products: int

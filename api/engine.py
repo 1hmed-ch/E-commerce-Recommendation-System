@@ -10,7 +10,7 @@ from typing import Optional, List
 from fastapi import HTTPException
 from nltk.stem import PorterStemmer
 
-from .models import Product, SearchResponse, StatsResponse
+from .models import Product, SearchResponse, StatsResponse, SearchResultItem, SearchResponseSlim
 from .database import mongodb
 from .config import MODEL_PATH
 
@@ -149,6 +149,54 @@ class RecommendationEngine:
             ]
             
             return SearchResponse(products=products, count=len(products), query=query)
+            
+        except HTTPException:
+            raise
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=str(e))
+    
+    def get_recommendations_slim(
+        self, 
+        query: str, 
+        top_k: int = 10, 
+        min_price: Optional[float] = None,
+        max_price: Optional[float] = None, 
+        category: Optional[str] = None,
+        category_name: Optional[str] = None,
+        min_stars: Optional[float] = None,
+        min_reviews: Optional[int] = None,
+        sort_by: str = "relevance"
+    ) -> SearchResponseSlim:
+        """Get product ASIN IDs based on the query (lightweight - no full product fetch)."""
+        
+        if not self.is_loaded:
+            raise HTTPException(status_code=503, detail="Recommendation engine not loaded")
+        
+        try:
+            # Clean and vectorize query
+            clean_q = self.clean_query(query)
+            query_vec = self.vectorizer.transform([clean_q])
+            
+            # Get nearest neighbors
+            n_neighbors = min(top_k * 5, self.tfidf_matrix.shape[0])  # Fetch more for potential filtering
+            distances, indices = self.search_model.kneighbors(query_vec, n_neighbors=n_neighbors)
+            
+            # Build results with ASINs and similarity scores
+            results = []
+            for idx, dist in zip(indices[0], distances[0]):
+                asin = self.product_ids[idx]
+                similarity = (1 - dist) * 100
+                # For slim response, final_score equals similarity (no ranking factors)
+                results.append(SearchResultItem(
+                    asin=asin,
+                    similarity=round(similarity, 2),
+                    final_score=round(similarity, 2)
+                ))
+            
+            # Limit to top_k results
+            results = results[:top_k]
+            
+            return SearchResponseSlim(results=results, count=len(results), query=query)
             
         except HTTPException:
             raise
