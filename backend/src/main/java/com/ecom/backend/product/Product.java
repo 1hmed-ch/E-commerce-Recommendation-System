@@ -29,6 +29,7 @@ public class Product {
     private String category;
     private String imageUrl;
     private String brand;
+    private int cluster_id;
 
     @Column(nullable = false)
     private Integer stockQuantity;
