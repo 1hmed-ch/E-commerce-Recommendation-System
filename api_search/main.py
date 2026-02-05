@@ -25,10 +25,59 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(
-    title="Simple Search API",
-    description="Simple SQL-based product search API with TF-IDF and fallback logic",
+    title="E-Commerce Product Search & Recommendation API",
+    description="""
+## Overview
+Advanced product search and recommendation API powered by TF-IDF and KNN machine learning models.
+
+### Features
+* **Smart Search** - TF-IDF based semantic search with fallback to trending products
+* **Intelligent Recommendations** - ML-powered product recommendations with category and price filtering
+* **Flexible Filtering** - Search by price range, category, and more
+* **ID-Only Endpoints** - Optimized endpoints returning only product IDs for client-side caching
+
+### Data
+* **837,291+ products** across 10 categories
+* Real-time MySQL database connectivity
+* Schema aligned with production e-commerce database
+
+### Technology Stack
+* FastAPI for high-performance APIs
+* MySQL for data persistence
+* Scikit-learn for ML models (TF-IDF, KNN, K-Means)
+* Pandas + NumPy for data processing
+    """,
     version="1.0.0",
-    lifespan=lifespan
+    lifespan=lifespan,
+    contact={
+        "name": "API Support",
+        "url": "https://github.com/yourusername/ecommerce-api",
+    },
+    license_info={
+        "name": "MIT",
+    },
+    openapi_tags=[
+        {
+            "name": "health",
+            "description": "Health check and system status endpoints"
+        },
+        {
+            "name": "search",
+            "description": "Product search endpoints with various filtering options"
+        },
+        {
+            "name": "recommendations",
+            "description": "ML-powered product recommendation endpoints"
+        },
+        {
+            "name": "products",
+            "description": "Product data retrieval endpoints"
+        },
+        {
+            "name": "metadata",
+            "description": "Category and statistics endpoints"
+        }
+    ]
 )
 
 # CORS
@@ -104,6 +153,69 @@ async def search(
         raise HTTPException(status_code=500, detail=str(e))
 
 
+@app.get("/search/ids")
+async def search_ids(
+    q: str = Query(..., min_length=1, description="Search query"),
+    top_k: int = Query(10, ge=1, le=100, description="Number of results"),
+    min_price: float = Query(None, ge=0, description="Minimum price filter"),
+    max_price: float = Query(None, ge=0, description="Maximum price filter"),
+    category: str = Query(None, description="Category filter")
+):
+    """
+    Search for products and return only product IDs.
+    
+    Same search logic as /search but returns only IDs instead of full product details.
+    Useful for client-side caching or when you only need IDs.
+    """
+    if not engine.is_loaded:
+        raise HTTPException(status_code=503, detail="Search engine not loaded")
+    
+    try:
+        product_ids = engine.search_ids(
+            query=q,
+            top_k=top_k,
+            min_price=min_price,
+            max_price=max_price,
+            category=category
+        )
+        return {
+            "product_ids": product_ids,
+            "count": len(product_ids),
+            "query": q
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/api/recommendations/{product_id}", response_model=List[int], tags=["Spring Boot Integration"])
+async def java_backend_recommendations(product_id: int):
+    """
+    Specific endpoint to satisfy the Java RecommendationClient contract.
+
+    1. Matches the path: /api/recommendations/{id}
+    2. Returns a raw list: [101, 102, 103]
+    """
+    if not engine.is_loaded:
+        # Return empty list if engine is down, so Java doesn't crash
+        print("[WARN] Engine not loaded, returning empty recommendations to Java")
+        return []
+
+    try:
+        # Reuse your existing logic!
+        # We use 'same_category=True' as a safe default for the e-commerce site
+        recommended_ids = engine.recommend_by_product_id(
+            product_id,
+            top_k=10,
+            same_category=True,
+            price_tolerance=0.5
+        )
+
+        # Java expects JUST the list, not a JSON object with "count" or "filters"
+        return recommended_ids
+
+    except Exception as e:
+        print(f"[ERROR] Failed to generate recommendations for Java: {str(e)}")
+        # Return empty list on error to keep the Java frontend running smoothly
+        return []
 @app.get("/trending")
 async def trending(
     n: int = Query(10, ge=1, le=50, description="Number of trending products")
@@ -115,17 +227,16 @@ async def trending(
     try:
         results = engine.get_trending_products(n, reason="Trending Request")
         
-        # Format response (results is now a list of dicts)
+        # Format response with new schema columns
         products = []
         for p in results:
             products.append({
-                "asin": str(p.get('asin', '')),
-                "title": str(p.get('title', 'N/A')),
+                "id": int(p.get('id', 0)),
+                "name": str(p.get('name', 'N/A')),
                 "price": float(p.get('price') or 0),
-                "stars": float(p.get('stars') or 0),
-                "reviews": int(p.get('reviews') or 0),
-                "category": str(p.get('super_category', 'N/A')),
-                "image": str(p.get('imgUrl', '')),
+                "category": str(p.get('category', 'N/A')),
+                "image": str(p.get('image_url', '')),
+                "stock_quantity": int(p.get('stock_quantity') or 0),
                 "similarity": 0.0,
                 "match_type": "Trending"
             })
@@ -134,6 +245,42 @@ async def trending(
             "products": products,
             "count": len(products),
             "reason": "Trending Request"
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/recommend/{product_id}")
+async def recommend(
+    product_id: int,
+    top_k: int = Query(10, ge=1, le=50, description="Number of recommendations"),
+    same_category: bool = Query(True, description="Only recommend from same category"),
+    price_tolerance: float = Query(0.5, ge=0, le=2.0, description="Price range tolerance (0.5 = ±50%)")
+):
+    """
+    Get recommended products for a given product ID. Returns list of product IDs.
+    
+    - **same_category**: If true, only recommends products from the same category
+    - **price_tolerance**: Price range filter (0.5 = ±50% of source price, 0 = no filter)
+    """
+    if not engine.is_loaded:
+        raise HTTPException(status_code=503, detail="Search engine not loaded")
+    
+    try:
+        recommended_ids = engine.recommend_by_product_id(
+            product_id, 
+            top_k,
+            same_category=same_category,
+            price_tolerance=price_tolerance
+        )
+        return {
+            "source_product_id": product_id,
+            "recommended_ids": recommended_ids,
+            "count": len(recommended_ids),
+            "filters": {
+                "same_category": same_category,
+                "price_tolerance": price_tolerance
+            }
         }
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))

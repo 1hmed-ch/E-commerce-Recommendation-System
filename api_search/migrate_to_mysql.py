@@ -21,32 +21,28 @@ MYSQL_USER = os.environ.get("MYSQL_USER", "root")
 MYSQL_PASSWORD = os.environ.get("MYSQL_PASSWORD", "")
 MYSQL_DATABASE = os.environ.get("MYSQL_DATABASE", "ecomrecom")
 
-PICKLE_PATH = Path(__file__).parent.parent / "recommendation_engine_tf_idf.pkl"
+PICKLE_PATH = Path(__file__).parent.parent / "optimized_search_engine.pkl"
 
-# SQL to create table
+# SQL to create table - matches ecomrecom.sql schema exactly
 CREATE_TABLE_SQL = """
 CREATE TABLE IF NOT EXISTS products (
-    id INT PRIMARY KEY AUTO_INCREMENT,
-    asin VARCHAR(50) UNIQUE NOT NULL,
-    title TEXT,
-    imgUrl TEXT,
-    stars DECIMAL(3, 2),
-    reviews INT,
-    price DECIMAL(10, 2),
-    categoryName VARCHAR(255),
-    isBestSeller BOOLEAN DEFAULT FALSE,
-    super_category VARCHAR(255),
-    price_log DECIMAL(10, 4),
-    review_log DECIMAL(10, 4),
-    clean_title TEXT,
-    semantic_text TEXT,
-    cluster_id INT,
-    INDEX idx_asin (asin),
-    INDEX idx_category (super_category),
+    id BIGINT NOT NULL AUTO_INCREMENT,
+    available BIT(1) NOT NULL DEFAULT 1,
+    brand VARCHAR(255) DEFAULT NULL,
+    category VARCHAR(255) DEFAULT NULL,
+    created_at DATETIME(6) NOT NULL,
+    description VARCHAR(2000) DEFAULT NULL,
+    image_url VARCHAR(255) DEFAULT NULL,
+    cluster_id INT DEFAULT NULL,
+    name VARCHAR(255) NOT NULL,
+    price DECIMAL(10,2) NOT NULL,
+    stock_quantity INT NOT NULL DEFAULT 100,
+    updated_at DATETIME(6) NOT NULL,
+    PRIMARY KEY (id),
+    INDEX idx_category (category),
     INDEX idx_price (price),
-    INDEX idx_stars (stars),
     INDEX idx_cluster (cluster_id)
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci;
 """
 
 
@@ -76,9 +72,10 @@ def connect_to_mysql():
             user=MYSQL_USER,
             password=MYSQL_PASSWORD,
             database=MYSQL_DATABASE,
-            connection_timeout=60,
+            connection_timeout=300,
             autocommit=False,
-            buffered=True
+            buffered=True,
+            use_pure=True
         )
         print(f"[OK] Connected to MySQL database: {MYSQL_DATABASE}")
         return conn
@@ -101,19 +98,22 @@ def load_pickle_data():
     return df
 
 
-def migrate_data(conn, df, batch_size=5000):
+def migrate_data(conn, df, batch_size=1000):
     """Insert product data into MySQL in batches."""
     cursor = conn.cursor()
     
     # Create table
     print("Creating products table...")
+    cursor.execute("SET FOREIGN_KEY_CHECKS=0")
+    cursor.execute("DROP TABLE IF EXISTS products")
     cursor.execute(CREATE_TABLE_SQL)
+    cursor.execute("SET FOREIGN_KEY_CHECKS=1")
     conn.commit()
     
-    # Prepare insert statement
-    columns = ['asin', 'title', 'imgUrl', 'stars', 'reviews', 'price', 
-               'categoryName', 'isBestSeller', 'super_category', 
-               'price_log', 'review_log', 'clean_title', 'semantic_text', 'cluster_id']
+    # Prepare insert statement - map pickle columns to ecomrecom.sql schema
+    columns = ['name', 'price', 'category', 'image_url', 'cluster_id', 
+               'available', 'stock_quantity', 'created_at', 'updated_at',
+               'brand', 'description']
     
     placeholders = ', '.join(['%s'] * len(columns))
     columns_str = ', '.join(columns)
@@ -121,20 +121,6 @@ def migrate_data(conn, df, batch_size=5000):
     insert_sql = f"""
     INSERT INTO products ({columns_str}) 
     VALUES ({placeholders})
-    ON DUPLICATE KEY UPDATE
-        title = VALUES(title),
-        imgUrl = VALUES(imgUrl),
-        stars = VALUES(stars),
-        reviews = VALUES(reviews),
-        price = VALUES(price),
-        categoryName = VALUES(categoryName),
-        isBestSeller = VALUES(isBestSeller),
-        super_category = VALUES(super_category),
-        price_log = VALUES(price_log),
-        review_log = VALUES(review_log),
-        clean_title = VALUES(clean_title),
-        semantic_text = VALUES(semantic_text),
-        cluster_id = VALUES(cluster_id)
     """
     
     total = len(df)
@@ -143,28 +129,48 @@ def migrate_data(conn, df, batch_size=5000):
     
     print(f"Inserting {total:,} products in batches of {batch_size}...")
     
+    from datetime import datetime
+    now = datetime.now()
+    
     for i in range(0, total, batch_size):
         batch = df.iloc[i:i+batch_size]
         batch_data = []
         
         for _, row in batch.iterrows():
             try:
-                # Clean and prepare values
-                values = []
-                for col in columns:
-                    val = row.get(col)
-                    # Handle NaN values
-                    if isinstance(val, float) and np.isnan(val):
-                        val = None
-                    # Convert numpy types to Python types
-                    elif isinstance(val, (np.integer, np.int64)):
-                        val = int(val)
-                    elif isinstance(val, (np.floating, np.float64)):
-                        val = float(val)
-                    elif isinstance(val, np.bool_):
-                        val = bool(val)
-                    values.append(val)
-                batch_data.append(tuple(values))
+                # Map pickle columns to SQL schema
+                name = row.get('title') or row.get('clean_title') or 'Unknown Product'
+                price = row.get('price') or 0.0
+                category = row.get('super_category') or row.get('categoryName')
+                image_url = row.get('imgUrl')
+                cluster_id = row.get('cluster_id')
+                available = 1  # Default: all products available
+                stock_quantity = 100  # Default stock
+                created_at = now
+                updated_at = now
+                brand = None  # Not in pickle data
+                description = row.get('semantic_text') or row.get('clean_title')
+                
+                # Clean and validate values
+                if isinstance(price, float) and np.isnan(price):
+                    price = 0.0
+                if isinstance(cluster_id, (np.integer, np.int64)):
+                    cluster_id = int(cluster_id)
+                elif isinstance(cluster_id, float) and np.isnan(cluster_id):
+                    cluster_id = None
+                    
+                # Truncate description to 2000 chars
+                if description and len(str(description)) > 2000:
+                    description = str(description)[:1997] + '...'
+                
+                # Truncate name to 255 chars
+                if name and len(str(name)) > 255:
+                    name = str(name)[:252] + '...'
+                
+                values = (name, price, category, image_url, cluster_id,
+                         available, stock_quantity, created_at, updated_at,
+                         brand, description)
+                batch_data.append(values)
             except Exception as e:
                 errors += 1
                 continue
@@ -195,10 +201,10 @@ def verify_migration(conn):
     cursor.execute("SELECT COUNT(*) FROM products")
     count = cursor.fetchone()[0]
     
-    cursor.execute("SELECT COUNT(DISTINCT super_category) FROM products")
+    cursor.execute("SELECT COUNT(DISTINCT category) FROM products")
     categories = cursor.fetchone()[0]
     
-    cursor.execute("SELECT AVG(price), AVG(stars) FROM products")
+    cursor.execute("SELECT AVG(price) FROM products")
     result = cursor.fetchone()
     
     cursor.close()
@@ -207,7 +213,6 @@ def verify_migration(conn):
     print(f"   - Total products: {count:,}")
     print(f"   - Categories: {categories}")
     print(f"   - Avg price: ${result[0]:.2f}")
-    print(f"   - Avg rating: {result[1]:.2f} stars")
 
 
 def main():
@@ -226,8 +231,8 @@ def main():
         return
     
     try:
-        # Migrate data
-        migrate_data(conn, df)
+        # Migrate data with smaller batch size for reliability
+        migrate_data(conn, df, batch_size=1000)
         
         # Verify
         verify_migration(conn)

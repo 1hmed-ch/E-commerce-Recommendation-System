@@ -10,7 +10,7 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 # Model path (for TF-IDF search)
 MODEL_PATH = os.environ.get(
     "MODEL_PATH", 
-    str(BASE_DIR / "recommendation_engine_tf_idf.pkl")
+    str(BASE_DIR / "optimized_search_engine.pkl")
 )
 
 # Server settings

@@ -100,10 +100,8 @@ class SearchEngine:
         category: Optional[str] = None
     ) -> List[Dict]:
         """
-        Production-ready search with 3-stage fallback.
-        All product data is fetched from MySQL.
-        
-        1. Direct Match -> 2. Broad Match -> 3. Trending Items
+        TF-IDF search (simplified for new schema without ASIN).
+        Uses product names for matching.
         """
         
         # --- STAGE 1: INPUT VALIDATION ---
@@ -118,82 +116,162 @@ class SearchEngine:
             print(f"[WARN] Unknown words in query: '{query}'. Switching to Trending.")
             return self.get_trending_products(top_k, reason="Unknown Words")
         
-        # --- STAGE 2: RETRIEVAL & SAFETY GATING ---
-        n_neighbors = min(500, len(self.product_asins))
+        # --- STAGE 2: TF-IDF RETRIEVAL ---
+        n_neighbors = min(500, len(self.product_asins)) if self.product_asins else 100
         distances, indices = self.search_model.kneighbors(query_vec, n_neighbors=n_neighbors)
         
-        # Get ASINs and similarity scores for matched products
-        matching_asins = [self.product_asins[i] for i in indices[0]]
-        similarity_scores = {
-            asin: (1 - dist) * 100 
-            for asin, dist in zip(matching_asins, distances[0])
-        }
+        # Get similarity scores for matched indices
+        similarity_scores = {}
+        matched_ids = []
+        for idx, dist in zip(indices[0], distances[0]):
+            similarity = (1 - dist) * 100
+            if similarity > 5.0:  # Filter threshold
+                # Map pickle index to product ID (1-indexed in DB)
+                product_id = int(idx) + 1
+                similarity_scores[product_id] = similarity
+                matched_ids.append(product_id)
         
-        # Check max similarity
-        max_sim = max(similarity_scores.values()) if similarity_scores else 0
-        if max_sim < 5.0:
-            print(f"[WARN] Low similarity for '{query}'. Switching to Trending.")
+        if not matched_ids:
             return self.get_trending_products(top_k, reason="Low Relevance")
         
-        # Filter ASINs with similarity > 5%
-        filtered_asins = [asin for asin, sim in similarity_scores.items() if sim > 5.0]
+        # --- STAGE 3: FETCH FROM MySQL ---
+        products = db.get_products_by_indices(indices[0].tolist())
         
-        # --- STAGE 3: FETCH FROM MySQL WITH FILTERS ---
-        products = db.search_products_with_filters(
-            asins=filtered_asins,
-            min_price=min_price,
-            max_price=max_price,
-            category=category
-        )
+        # Apply filters manually (since we're ID-based now)
+        filtered_products = []
+        for p in products:
+            if min_price is not None and (p.get('price') or 0) < min_price:
+                continue
+            if max_price is not None and (p.get('price') or 0) > max_price:
+                continue
+            if category and p.get('category') != category:
+                continue
+            filtered_products.append(p)
         
-        if not products:
+        if not filtered_products:
             return self.get_trending_products(top_k, reason="No matches after filters")
         
-        # --- STAGE 4: CLUSTER INTELLIGENCE ---
-        predicted_cluster = None
-        if self.kmeans is not None:
-            predicted_cluster = self.kmeans.predict(query_vec)[0]
-        
-        # --- STAGE 5: SCORING & RANKING ---
-        # Pre-compute global scores for ranking
-        all_stars = [p.get('stars') or 0 for p in products]
-        all_reviews = [np.log1p(p.get('reviews') or 0) for p in products]
-        
-        # Rank percentiles
-        if len(all_stars) > 1:
-            star_ranks = pd.Series(all_stars).rank(pct=True).tolist()
-            rev_ranks = pd.Series(all_reviews).rank(pct=True).tolist()
-        else:
-            star_ranks = [0.5] * len(products)
-            rev_ranks = [0.5] * len(products)
-        
+        # --- STAGE 4: SCORING ---
         scored_products = []
-        for i, p in enumerate(products):
-            asin = p.get('asin')
-            similarity = similarity_scores.get(asin, 0)
-            
-            # Cluster boost (1.5x if in predicted cluster)
-            cluster_multiplier = 1.0
-            if predicted_cluster is not None and p.get('cluster_id') == predicted_cluster:
-                cluster_multiplier = 1.5
-            
-            boosted_sim = similarity * cluster_multiplier
-            
-            # Final score: 60% text + 20% stars + 20% reviews
-            final_score = (
-                (boosted_sim * 0.6) +
-                (star_ranks[i] * 100 * 0.2) +
-                (rev_ranks[i] * 100 * 0.2)
-            )
+        for p in filtered_products:
+            product_id = p.get('id')
+            similarity = similarity_scores.get(product_id, 0)
             
             p['similarity'] = round(similarity, 2)
-            p['final_score'] = round(final_score, 2)
+            p['final_score'] = similarity  # Simplified scoring
             p['match_type'] = "Direct Search"
             scored_products.append(p)
         
-        # Sort by final score and return top_k
-        scored_products.sort(key=lambda x: x['final_score'], reverse=True)
+        # Sort by similarity
+        scored_products.sort(key=lambda x: x['similarity'], reverse=True)
         return scored_products[:top_k]
+    
+    def search_ids(
+        self,
+        query: str,
+        top_k: int = 10,
+        min_price: Optional[float] = None,
+        max_price: Optional[float] = None,
+        category: Optional[str] = None
+    ) -> List[int]:
+        """
+        Search for products and return only their IDs.
+        Uses the same logic as search() but returns a list of product IDs.
+        
+        Args:
+            query: Search query
+            top_k: Number of results to return
+            min_price: Minimum price filter
+            max_price: Maximum price filter
+            category: Category filter
+            
+        Returns:
+            List of product IDs ordered by relevance
+        """
+        # Use the full search function
+        products = self.search(query, top_k, min_price, max_price, category)
+        
+        # Extract and return only IDs
+        return [p.get('id') for p in products if p.get('id') is not None]
+    
+    def recommend_by_product_id(
+        self, 
+        product_id: int, 
+        top_k: int = 10,
+        same_category: bool = True,
+        price_tolerance: float = 0.5  # 50% price range by default
+    ) -> List[int]:
+        """
+        Get recommended product IDs based on a source product.
+        
+        Process:
+        1. Fetch product from DB (get cluster_id, name, category, price)
+        2. Vectorize product name with TF-IDF
+        3. Find K nearest neighbors
+        4. Optionally filter by same category and similar price range
+        5. Apply cluster boost (1.5x if same cluster)
+        6. Return list of product IDs only
+        
+        Args:
+            product_id: Source product ID
+            top_k: Number of recommendations to return
+            same_category: If True, only recommend products from same category
+            price_tolerance: Price range tolerance (0.5 = ±50% of source price)
+        """
+        # Get source product
+        source_product = db.get_product_by_id(product_id)
+        if not source_product:
+            return []
+        
+        # Extract product features
+        product_name = source_product.get('name', '')
+        source_category = source_product.get('category')
+        source_price = float(source_product.get('price', 0))  # Convert Decimal to float
+        source_cluster = source_product.get('cluster_id')
+        
+        # Calculate price range if filtering enabled
+        min_price = None
+        max_price = None
+        if price_tolerance and source_price > 0:
+            min_price = source_price * (1 - price_tolerance)
+            max_price = source_price * (1 + price_tolerance)
+        
+        # Use the search function with product name and filters
+        category_filter = source_category if same_category else None
+        
+        # Search for similar products
+        similar_products = self.search(
+            query=product_name,
+            top_k=top_k * 3,  # Get more to account for filtering
+            min_price=min_price,
+            max_price=max_price,
+            category=category_filter
+        )
+        
+        # Filter out the source product and apply cluster boosting
+        recommendations = []
+        for p in similar_products:
+            rec_id = p.get('id')
+            
+            # Skip the source product itself
+            if rec_id == product_id:
+                continue
+            
+            score = p.get('similarity', 0)
+            
+            # Apply cluster boost if in same cluster
+            if source_cluster is not None and p.get('cluster_id') == source_cluster:
+                score *= 1.5
+            
+            recommendations.append({'id': rec_id, 'score': score})
+            
+            # Stop when we have enough
+            if len(recommendations) >= top_k:
+                break
+        
+        # Sort by score and return top_k IDs
+        recommendations.sort(key=lambda x: x['score'], reverse=True)
+        return [r['id'] for r in recommendations[:top_k]]
     
     def search_to_dict(
         self,
@@ -217,17 +295,16 @@ class SearchEngine:
         # Get match type from first result
         match_type = products[0].get('match_type', 'Direct Search')
         
-        # Format response
+        # Format response with new schema columns
         formatted_products = []
         for p in products:
             formatted_products.append({
-                "asin": str(p.get('asin', '')),
-                "title": str(p.get('title', 'N/A')),
+                "id": int(p.get('id', 0)),
+                "name": str(p.get('name', 'N/A')),
                 "price": float(p.get('price') or 0),
-                "stars": float(p.get('stars') or 0),
-                "reviews": int(p.get('reviews') or 0),
-                "category": str(p.get('super_category', 'N/A')),
-                "image": str(p.get('imgUrl', '')),
+                "category": str(p.get('category', 'N/A')),
+                "image": str(p.get('image_url', '')),
+                "stock_quantity": int(p.get('stock_quantity') or 0),
                 "similarity": p.get('similarity', 0),
                 "final_score": p.get('final_score', 0),
                 "match_type": p.get('match_type', 'Direct Search')

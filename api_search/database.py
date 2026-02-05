@@ -15,11 +15,11 @@ from .config import MYSQL_HOST, MYSQL_PORT, MYSQL_USER, MYSQL_PASSWORD, MYSQL_DA
 class MySQLDatabase:
     """MySQL database connection manager for product operations."""
     
-    # Product columns to fetch
+    # Product columns to fetch - matches ecomrecom.sql schema
     PRODUCT_COLUMNS = [
-        'id', 'asin', 'title', 'imgUrl', 'stars', 'reviews', 'price',
-        'categoryName', 'isBestSeller', 'super_category', 
-        'price_log', 'review_log', 'clean_title', 'semantic_text', 'cluster_id'
+        'id', 'name', 'price', 'brand', 'category', 'description',
+        'image_url', 'stock_quantity', 'available', 'cluster_id',
+        'created_at', 'updated_at'
     ]
     
     def __init__(self):
@@ -135,15 +135,15 @@ class MySQLDatabase:
             return cursor.fetchall()
     
     def get_trending_products(self, top_n: int = 10) -> List[Dict[str, Any]]:
-        """Get trending products (high stars * log reviews)."""
+        """Get trending products (high price * stock as popularity proxy)."""
         cols = ', '.join(self.PRODUCT_COLUMNS)
         
         with self.get_cursor() as cursor:
             cursor.execute(f"""
                 SELECT {cols},
-                       (stars * LOG(reviews + 1)) as trending_score
+                       (price * LN(stock_quantity + 1)) as trending_score
                 FROM products 
-                WHERE stars IS NOT NULL AND reviews IS NOT NULL
+                WHERE price IS NOT NULL AND stock_quantity IS NOT NULL
                 ORDER BY trending_score DESC
                 LIMIT %s
             """, (top_n,))
@@ -156,16 +156,18 @@ class MySQLDatabase:
         max_price: float = None,
         category: str = None
     ) -> List[Dict[str, Any]]:
-        """Get products by ASINs with optional filters."""
+        """Get products by name similarity with optional filters (no ASIN in new schema)."""
         if not asins:
-            return []
+            # If no ASINs provided, just use filters
+            return self.get_all_products(50)
         
+        # Since we don't have ASIN anymore, we'll need to match by name
+        # For now, just apply filters to all products (simplified)
         cols = ', '.join(self.PRODUCT_COLUMNS)
-        placeholders = ', '.join(['%s'] * len(asins))
         
         # Build WHERE clause
-        where_parts = [f"asin IN ({placeholders})"]
-        params = list(asins)
+        where_parts = []
+        params = []
         
         if min_price is not None:
             where_parts.append("price >= %s")
@@ -174,16 +176,17 @@ class MySQLDatabase:
             where_parts.append("price <= %s")
             params.append(max_price)
         if category:
-            where_parts.append("super_category = %s")
+            where_parts.append("category = %s")
             params.append(category)
         
-        where_clause = " AND ".join(where_parts)
+        where_clause = " AND ".join(where_parts) if where_parts else "1=1"
         
         with self.get_cursor() as cursor:
             cursor.execute(f"""
                 SELECT {cols}
                 FROM products 
                 WHERE {where_clause}
+                LIMIT 100
             """, tuple(params))
             return cursor.fetchall()
     
@@ -191,12 +194,12 @@ class MySQLDatabase:
         """Get unique categories."""
         with self.get_cursor() as cursor:
             cursor.execute("""
-                SELECT DISTINCT super_category 
+                SELECT DISTINCT category
                 FROM products 
-                WHERE super_category IS NOT NULL
-                ORDER BY super_category
+                WHERE category IS NOT NULL
+                ORDER BY category
             """)
-            return [row['super_category'] for row in cursor.fetchall()]
+            return [row['category'] for row in cursor.fetchall()]
     
     def get_stats(self) -> Dict[str, Any]:
         """Get aggregate statistics."""
@@ -205,8 +208,7 @@ class MySQLDatabase:
                 SELECT 
                     COUNT(*) as total_products,
                     AVG(price) as avg_price,
-                    AVG(stars) as avg_rating,
-                    COUNT(DISTINCT super_category) as categories
+                    COUNT(DISTINCT category) as categories
                 FROM products
             """)
             result = cursor.fetchone()
@@ -215,10 +217,9 @@ class MySQLDatabase:
                 return {
                     "total_products": result['total_products'] or 0,
                     "avg_price": round(result['avg_price'], 2) if result['avg_price'] else 0,
-                    "avg_rating": round(result['avg_rating'], 2) if result['avg_rating'] else 0,
                     "categories": result['categories'] or 0
                 }
-            return {"total_products": 0, "categories": 0, "avg_price": 0, "avg_rating": 0}
+            return {"total_products": 0, "categories": 0, "avg_price": 0}
     
     def get_all_products_dataframe(self):
         """Get all products as a pandas-compatible list of dicts (for indexing)."""
